@@ -27,9 +27,13 @@ $(SECURE_BOOT_VERIFICATION_KEY): $(SECURE_BOOT_SIGNING_KEY) $(SDKCONFIG_MAKEFILE
 	$(ESPSECUREPY) extract_public_key --keyfile $< $@
 else
 # find the configured public key file
+ifdef IS_BOOTLOADER_BUILD
+ORIG_SECURE_BOOT_VERIFICATION_KEY := $(call resolvepath,$(call dequote,$(CONFIG_SECURE_BOOT_VERIFICATION_KEY)),$(MAIN_PROJECT_PATH))
+else
 ORIG_SECURE_BOOT_VERIFICATION_KEY := $(call resolvepath,$(call dequote,$(CONFIG_SECURE_BOOT_VERIFICATION_KEY)),$(PROJECT_PATH))
-
+endif
 $(ORIG_SECURE_BOOT_VERIFICATION_KEY):
+	@echo "Dequote '$(call dequote,$(CONFIG_SECURE_BOOT_VERIFICATION_KEY))'"
 	@echo "Secure boot verification public key '$@' missing."
 	@echo "This can be extracted from the private signing key, see"
 	@echo "docs/security/secure-boot.rst for details."
