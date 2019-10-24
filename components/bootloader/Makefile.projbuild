@@ -26,6 +26,7 @@ BOOTLOADER_OFFSET := 0x1000
 # overriden, because they need to be re-defined in the child
 # project.
 BOOTLOADER_MAKE= +\
+	MAIN_PROJECT_PATH=$(PROJECT_PATH) \
 	PROJECT_PATH= \
 	COMPONENT_DIRS= \
 	$(MAKE) -C $(BOOTLOADER_COMPONENT_PATH)/subproject \
