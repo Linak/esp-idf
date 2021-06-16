@@ -26,10 +26,14 @@
 #include "esp_flash_partitions.h"
 #include "bootloader_flash.h"
 #include "bootloader_common.h"
+#include "bootloader_config.h"
+#include "bootloader_utility.h"
 #include "soc/gpio_periph.h"
 #include "soc/efuse_reg.h"
 #include "soc/rtc.h"
 #include "soc/spi_reg.h"
+#include "soc/efuse_reg.h"
+#include "soc/apb_ctrl_reg.h"
 #include "esp_image_format.h"
 #include "bootloader_sha.h"
 #include "sys/param.h"
@@ -184,22 +188,7 @@ esp_err_t bootloader_common_get_sha256_of_partition (uint32_t address, uint32_t 
         size = data.image_len;
     }
     // If image is type by data then hash is calculated for entire image.
-    const void *partition_bin = bootloader_mmap(address, size);
-    if (partition_bin == NULL) {
-        ESP_LOGE(TAG, "bootloader_mmap(0x%x, 0x%x) failed", address, size);
-        return ESP_FAIL;
-    }
-    bootloader_sha256_handle_t sha_handle = bootloader_sha256_start();
-    if (sha_handle == NULL) {
-        bootloader_munmap(partition_bin);
-        return ESP_ERR_NO_MEM;
-    }
-    bootloader_sha256_data(sha_handle, partition_bin, size);
-    bootloader_sha256_finish(sha_handle, out_sha_256);
-
-    bootloader_munmap(partition_bin);
-
-    return ESP_OK;
+    return bootloader_sha256_flash_contents(address, size, out_sha_256);
 }
 
 int bootloader_common_select_otadata(const esp_ota_select_entry_t *two_otadata, bool *valid_two_otadata, bool max)
@@ -245,19 +234,15 @@ esp_err_t bootloader_common_get_partition_description(const esp_partition_pos_t 
         return ESP_ERR_INVALID_ARG;
     }
 
-//    const uint8_t *image = bootloader_mmap(partition->offset, partition->size);
-const uint32_t app_desc_offset = sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
-const uint32_t mmap_size = app_desc_offset + sizeof(esp_app_desc_t);
-const uint8_t *image = bootloader_mmap(partition->offset, mmap_size);
-
+    const uint32_t app_desc_offset = sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t);
+    const uint32_t mmap_size = app_desc_offset + sizeof(esp_app_desc_t);
+    const uint8_t *image = bootloader_mmap(partition->offset, mmap_size);
     if (image == NULL) {
-//        ESP_LOGE(TAG, "bootloader_mmap(0x%x, 0x%x) failed", partition->offset, partition->size);
-ESP_LOGE(TAG, "bootloader_mmap(0x%x, 0x%x) failed", partition->offset, mmap_size);
+        ESP_LOGE(TAG, "bootloader_mmap(0x%x, 0x%x) failed", partition->offset, mmap_size);
         return ESP_FAIL;
     }
 
-//    memcpy(app_desc, image + sizeof(esp_image_header_t) + sizeof(esp_image_segment_header_t), sizeof(esp_app_desc_t));
-memcpy(app_desc, image + app_desc_offset, sizeof(esp_app_desc_t));
+    memcpy(app_desc, image + app_desc_offset, sizeof(esp_app_desc_t));
     bootloader_munmap(image);
 
     if (app_desc->magic_word != ESP_APP_DESC_MAGIC_WORD) {
@@ -282,12 +267,50 @@ void bootloader_common_vddsdio_configure()
 #endif // CONFIG_BOOTLOADER_VDDSDIO_BOOST
 }
 
-void bootloader_common_set_flash_cs_timing()
+#ifdef CONFIG_IDF_TARGET_ESP32
+uint8_t bootloader_common_get_chip_revision(void)
 {
-    SET_PERI_REG_MASK(SPI_USER_REG(0), SPI_CS_HOLD_M | SPI_CS_SETUP_M);
-    SET_PERI_REG_BITS(SPI_CTRL2_REG(0), SPI_HOLD_TIME_V, 1, SPI_HOLD_TIME_S);
-    SET_PERI_REG_BITS(SPI_CTRL2_REG(0), SPI_SETUP_TIME_V, 0, SPI_SETUP_TIME_S);
-    SET_PERI_REG_MASK(SPI_USER_REG(1), SPI_CS_HOLD_M | SPI_CS_SETUP_M);
-    SET_PERI_REG_BITS(SPI_CTRL2_REG(1), SPI_HOLD_TIME_V, 1, SPI_HOLD_TIME_S);
-    SET_PERI_REG_BITS(SPI_CTRL2_REG(1), SPI_SETUP_TIME_V, 0, SPI_SETUP_TIME_S);
+    uint8_t eco_bit0, eco_bit1, eco_bit2;
+    eco_bit0 = (REG_READ(EFUSE_BLK0_RDATA3_REG) & 0xF000) >> 15;
+    eco_bit1 = (REG_READ(EFUSE_BLK0_RDATA5_REG) & 0x100000) >> 20;
+    eco_bit2 = (REG_READ(APB_CTRL_DATE_REG) & 0x80000000) >> 31;
+    uint32_t combine_value = (eco_bit2 << 2) | (eco_bit1 << 1) | eco_bit0;
+    uint8_t chip_ver = 0;
+    switch (combine_value) {
+    case 0:
+        chip_ver = 0;
+        break;
+    case 1:
+        chip_ver = 1;
+        break;
+    case 3:
+        chip_ver = 2;
+        break;
+    case 7:
+        chip_ver = 3;
+        break;
+    default:
+        chip_ver = 0;
+        break;
+    }
+    return chip_ver;
+}
+#endif
+
+esp_err_t bootloader_common_check_chip_validity(const esp_image_header_t* img_hdr, esp_image_type type)
+{
+    esp_err_t err = ESP_OK;
+    esp_chip_id_t chip_id = CONFIG_IDF_FIRMWARE_CHIP_ID;
+    if (chip_id != img_hdr->chip_id) {
+        ESP_LOGE(TAG, "mismatch chip ID, expected %d, found %d", chip_id, img_hdr->chip_id);
+        err = ESP_FAIL;
+    }
+    uint8_t revision = bootloader_common_get_chip_revision();
+    if (revision < img_hdr->min_chip_rev) {
+        ESP_LOGE(TAG, "can't run on lower chip revision, expected %d, found %d", revision, img_hdr->min_chip_rev);
+        err = ESP_FAIL;
+    } else if (revision != img_hdr->min_chip_rev) {
+        ESP_LOGI(TAG, "chip revision: %d, min. %s chip revision: %d", revision, type == ESP_IMAGE_BOOTLOADER ? "bootloader" : "application", img_hdr->min_chip_rev);
+    }
+    return err;
 }

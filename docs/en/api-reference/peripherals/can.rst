@@ -157,7 +157,10 @@ The CAN driver contains an alert feature which is used to notify the application
     The **error warning limit** can be used to preemptively warn the application of bus errors before the error passive state is reached. By default the CAN driver sets the **error warning limit** to **96**. The ``CAN_ALERT_ABOVE_ERR_WARN`` is raised when the TEC or REC becomes larger then or equal to the error warning limit. The ``CAN_ALERT_BELOW_ERR_WARN`` is raised when both TEC and REC return back to values below **96**.
 
 .. note::
-    When enabling alerts, the ``CAN_ALERT_AND_LOG`` flag can be used to cause the CAN driver to log any raised alerts to UART. The ``CAN_ALERT_ALL`` and ``CAN_ALERT_NONE`` macros can also be used to enable/disable all alerts during configuration/reconfiguration.
+    When enabling alerts, the ``CAN_ALERT_AND_LOG`` flag can be used to cause the CAN driver to log any raised alerts to UART. However, alert logging is disabled and ``CAN_ALERT_AND_LOG`` if the :ref:`CONFIG_CAN_ISR_IN_IRAM` option is enabled (see :ref:`placing-isr-into-iram`).
+
+.. note::
+    The ``CAN_ALERT_ALL`` and ``CAN_ALERT_NONE`` macros can also be used to enable/disable all alerts during configuration/reconfiguration.
 
 Bit Timing
 ^^^^^^^^^^
@@ -168,7 +171,7 @@ The operating bit rate of the CAN controller is configured using the :cpp:type:`
     2. **Timing Segment 1** consists of 1 to 16 time quanta before sample point
     3. **Timing Segment 2** consists of 1 to 8 time quanta after sample point
 
-The **Baudrate Prescaler** is used to determine the period of each time quanta by dividing the CAN controller's source clock (80 MHz APB clock). The ``brp`` can be **any even number from 2 to 128**.
+The **Baudrate Prescaler** is used to determine the period of each time quanta by dividing the CAN controller's source clock (80 MHz APB clock). The ``brp`` can be **any even number from 2 to 128**. If the ESP32 is a revision 2 or later chip, the ``brp`` will also support **any multiple of 4 from 132 to 256**, and can be enabled by setting the :ref:`CONFIG_ESP32_REV_MIN` to revision 2 or higher.
 
 .. packetdiag:: ../../../_static/diagrams/can/can_bit_timing.diag
     :caption: Bit timing configuration for 500kbit/s given BRP = 8
@@ -183,6 +186,9 @@ The **Synchronization Jump Width** is used to determined the maximum number of t
 
 Bit timing **macro initializers** are also available for commonly used CAN bus bit rates. The following macro initializers are provided by the CAN driver.
 
+    - ``CAN_TIMING_CONFIG_12_5KBITS()``
+    - ``CAN_TIMING_CONFIG_16KBITS()``
+    - ``CAN_TIMING_CONFIG_20KBITS()``
     - ``CAN_TIMING_CONFIG_25KBITS()``
     - ``CAN_TIMING_CONFIG_50KBITS()``
     - ``CAN_TIMING_CONFIG_100KBITS()``
@@ -191,6 +197,10 @@ Bit timing **macro initializers** are also available for commonly used CAN bus b
     - ``CAN_TIMING_CONFIG_500KBITS()``
     - ``CAN_TIMING_CONFIG_800KBITS()``
     - ``CAN_TIMING_CONFIG_1MBITS()``
+
+.. note::
+    The macro initializers for 12.5K, 16K, and 20K bit rates are only available
+    for ESP32 revision 2 or later.
 
 Acceptance Filter
 ^^^^^^^^^^^^^^^^^
@@ -216,6 +226,23 @@ Disabling TX Queue
 
 The TX queue can be disabled during configuration by setting the ``tx_queue_len`` member of :cpp:type:`can_general_config_t` to ``0``. This will allow applications that do not require message transmission to save a small amount of memory when using the CAN driver.
 
+.. _placing-isr-into-iram:
+
+Placing ISR into IRAM
+^^^^^^^^^^^^^^^^^^^^^
+
+The CAN driver's ISR (Interrupt Service Routine) can be placed into IRAM so that the ISR can still run whilst the cache is disabled. Placing the ISR into IRAM may be necessary to maintain the CAN driver's functionality during lengthy cache disabling operations (such as SPI Flash writes, OTA updates etc). Whilst the cache is disabled, the ISR will continue to:
+
+- Read received messages from the RX buffer and place them into the driver's RX queue.
+- Load messages pending transmission from the driver's TX queue and write them into the TX buffer.
+
+To place the CAN driver's ISR, users must do the following:
+
+- Enable the :ref:`CONFIG_CAN_ISR_IN_IRAM` option using ``idf.py menuconfig``.
+- When calling :cpp:func:`can_driver_install`, the `intr_flags` member of :cpp:type:`can_general_config_t` should set the :c:macro:`ESP_INTR_FLAG_IRAM` set.
+
+.. note::
+    When the :ref:`CONFIG_CAN_ISR_IN_IRAM` option is enabled, the CAN driver will no longer log any alerts (i.e., the ``CAN_ALERT_AND_LOG`` flag will not have any effect).
 
 .. -------------------------------- CAN Driver ---------------------------------
 

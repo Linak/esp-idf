@@ -267,15 +267,28 @@ typedef enum {
 
 typedef enum {
     ESP_BLE_SM_PASSKEY = 0,
+    /* Authentication requirements of local device */
     ESP_BLE_SM_AUTHEN_REQ_MODE,
+    /* The IO capability of local device */
     ESP_BLE_SM_IOCAP_MODE,
+    /* Initiator Key Distribution/Generation */
     ESP_BLE_SM_SET_INIT_KEY,
+    /* Responder Key Distribution/Generation */
     ESP_BLE_SM_SET_RSP_KEY,
+    /* Maximum Encryption key size to support */
     ESP_BLE_SM_MAX_KEY_SIZE,
+    /* Minimum Encryption key size requirement from Peer */
+    ESP_BLE_SM_MIN_KEY_SIZE,
+    /* Set static Passkey */
     ESP_BLE_SM_SET_STATIC_PASSKEY,
+    /* Reset static Passkey */
     ESP_BLE_SM_CLEAR_STATIC_PASSKEY,
+    /* Accept only specified SMP Authentication requirement */
     ESP_BLE_SM_ONLY_ACCEPT_SPECIFIED_SEC_AUTH,
+    /* Enable/Disable OOB support */
     ESP_BLE_SM_OOB_SUPPORT,
+    /* Appl encryption key size */
+    ESP_BLE_APP_ENC_KEY_SIZE,
     ESP_BLE_SM_MAX_PARAM,
 } esp_ble_sm_param_t;
 
@@ -589,7 +602,7 @@ typedef enum {
 typedef enum {
     ESP_BLE_DUPLICATE_SCAN_EXCEPTIONAL_INFO_ADV_ADDR       = 0,  /*!< BLE advertising address , device info will be added into ESP_BLE_DUPLICATE_SCAN_EXCEPTIONAL_ADDR_LIST */
     ESP_BLE_DUPLICATE_SCAN_EXCEPTIONAL_INFO_MESH_LINK_ID,        /*!< BLE mesh link ID, it is for BLE mesh, device info will be added into ESP_BLE_DUPLICATE_SCAN_EXCEPTIONAL_MESH_LINK_ID_LIST */
-    ESP_BLE_DUPLICATE_SCAN_EXCEPTIONAL_INFO_MESH_BEACON_TYPE,    /*!< BLE mesh beacon AD type, the format is | Len | 0x2B | Beacon Type | Beacon Data | */     
+    ESP_BLE_DUPLICATE_SCAN_EXCEPTIONAL_INFO_MESH_BEACON_TYPE,    /*!< BLE mesh beacon AD type, the format is | Len | 0x2B | Beacon Type | Beacon Data | */
     ESP_BLE_DUPLICATE_SCAN_EXCEPTIONAL_INFO_MESH_PROV_SRV_ADV,   /*!< BLE mesh provisioning service uuid, the format is | 0x02 | 0x01 | flags | 0x03 | 0x03 | 0x1827 | .... |` */
     ESP_BLE_DUPLICATE_SCAN_EXCEPTIONAL_INFO_MESH_PROXY_SRV_ADV,  /*!< BLE mesh adv with proxy service uuid, the format is | 0x02 | 0x01 | flags | 0x03 | 0x03 | 0x1828 | .... |` */
 } esp_ble_duplicate_exceptional_info_type_t;
@@ -884,7 +897,7 @@ esp_err_t esp_ble_gap_update_conn_params(esp_ble_conn_update_params_t *params);
 esp_err_t esp_ble_gap_set_pkt_data_len(esp_bd_addr_t remote_device, uint16_t tx_data_length);
 
 /**
- * @brief           This function sets the random address for the application
+ * @brief           This function sets the static Random Address and Non-Resolvable Private Address for the application
  *
  * @param[in]       rand_addr: the random address which should be setting
  *
@@ -1232,6 +1245,18 @@ esp_err_t esp_ble_oob_req_reply(esp_bd_addr_t bd_addr, uint8_t *TK, uint8_t len)
 */
 esp_err_t esp_ble_gap_disconnect(esp_bd_addr_t remote_device);
 
+
+/**
+* @brief           This function is called to authorized a link after Authentication(MITM protection)
+*
+* @param[in]       bd_addr: BD address of the peer device.
+* @param[out]      authorize: Authorized the link or not.
+*
+* @return          - ESP_OK : success
+*                  - other  : failed
+*
+*/
+esp_err_t esp_gap_ble_set_authorization(esp_bd_addr_t bd_addr, bool authorize);
 #ifdef __cplusplus
 }
 #endif

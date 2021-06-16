@@ -96,7 +96,7 @@ build_example () {
 
     local EXAMPLE_DIR=$(dirname "${MAKE_FILE}")
     local EXAMPLE_NAME=$(basename "${EXAMPLE_DIR}")
-    
+
     # Check if the example needs a different base directory.
     # Path of the Makefile relative to $IDF_PATH
     local MAKE_FILE_REL=${MAKE_FILE#"${IDF_PATH}/"}
@@ -125,6 +125,9 @@ build_example () {
         # If sdkconfig.ci file is present, append it to sdkconfig.defaults,
         # replacing environment variables
         if [[ -f "$SDKCONFIG_DEFAULTS_CI" ]]; then
+            # Make sure that the last line of sdkconfig.defaults is terminated. Otherwise, the first line
+            # of $SDKCONFIG_DEFAULTS_CI will be joined with the last one of sdkconfig.defaults.
+            echo >> sdkconfig.defaults
             cat $SDKCONFIG_DEFAULTS_CI | $IDF_PATH/tools/ci/envsubst.py >> sdkconfig.defaults
         fi
 
@@ -184,6 +187,8 @@ library/error\.o\
 \|changes choice state\
 \|Compiler version is not supported\
 \|Toolchain version is not supported\
+\|Python 3 versions older than 3.6 are not supported\
+\|Python 2 is deprecated and will be removed in future versions\
 "
 
 sort -u "${LOG_SUSPECTED}" | grep -v "${IGNORE_WARNS}" \

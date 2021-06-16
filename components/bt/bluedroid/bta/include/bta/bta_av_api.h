@@ -36,12 +36,6 @@
 /*****************************************************************************
 **  Constants and data types
 *****************************************************************************/
-/* Set to TRUE if seperate authorization prompt desired for AVCTP besides A2DP authorization */
-/* Typically FALSE when AVRCP is used in conjunction with A2DP */
-#ifndef BTA_AV_WITH_AVCTP_AUTHORIZATION
-#define BTA_AV_WITH_AVCTP_AUTHORIZATION     FALSE
-#endif
-
 /* AV status values */
 #define BTA_AV_SUCCESS          0       /* successful operation */
 #define BTA_AV_FAIL             1       /* generic failure */
@@ -509,8 +503,10 @@ typedef struct {
     UINT32  company_id;         /* AVRCP Company ID */
     UINT16  avrc_mtu;           /* AVRCP MTU at L2CAP for control channel */
     UINT16  avrc_br_mtu;        /* AVRCP MTU at L2CAP for browsing channel */
-    UINT16  avrc_ct_cat;        /* AVRCP controller categories */
-    UINT16  avrc_tg_cat;        /* AVRCP target categories */
+    UINT16  avrc_snk_ct_cat;    /* AVRCP controller categories as SNK */
+    UINT16  avrc_snk_tg_cat;    /* AVRCP target categories SNK */
+    UINT16  avrc_src_ct_cat;    /* AVRCP controller categories as SRC */
+    UINT16  avrc_src_tg_cat;    /* AVRCP target categories as SRC */
     UINT16  sig_mtu;            /* AVDTP signaling channel MTU at L2CAP */
     UINT16  audio_mtu;          /* AVDTP audio transport channel MTU at L2CAP */
     const UINT16 *p_audio_flush_to;/* AVDTP audio transport channel flush timeout */
@@ -579,8 +575,7 @@ void BTA_AvDisable(void);
 ** Returns          void
 **
 *******************************************************************************/
-void BTA_AvRegister(tBTA_AV_CHNL chnl, const char *p_service_name,
-                    UINT8 app_id, tBTA_AV_DATA_CBACK  *p_data_cback, tBTA_AV_CO_FUNCTS *bta_av_cos, UINT8 tsep);
+void BTA_AvRegister(tBTA_AV_CHNL chnl, const char *p_service_name, UINT8 app_id, tBTA_AV_DATA_CBACK  *p_data_cback, tBTA_AV_CO_FUNCTS *bta_av_cos, UINT8 tsep);
 
 /*******************************************************************************
 **

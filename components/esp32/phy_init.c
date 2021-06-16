@@ -68,14 +68,27 @@ static _lock_t s_modem_sleep_lock;
 /* time stamp updated when the PHY/RF is turned on */
 static int64_t s_phy_rf_en_ts = 0;
 
+static DRAM_ATTR portMUX_TYPE s_phy_int_mux = portMUX_INITIALIZER_UNLOCKED;
+
 uint32_t IRAM_ATTR phy_enter_critical(void)
 {
-    return portENTER_CRITICAL_NESTED();
+    if (xPortInIsrContext()) {
+        portENTER_CRITICAL_ISR(&s_phy_int_mux);
+    } else {
+        portENTER_CRITICAL(&s_phy_int_mux);
+    }
+    // Interrupt level will be stored in current tcb, so always return zero.
+    return 0;
 }
 
 void IRAM_ATTR phy_exit_critical(uint32_t level)
 {
-    portEXIT_CRITICAL_NESTED(level);
+    // Param level don't need any more, ignore it.
+    if (xPortInIsrContext()) {
+        portEXIT_CRITICAL_ISR(&s_phy_int_mux);
+    } else {
+        portEXIT_CRITICAL(&s_phy_int_mux);
+    }
 }
 
 int64_t esp_phy_rf_get_on_ts(void)
@@ -100,6 +113,16 @@ static inline void phy_update_wifi_mac_time(bool en_clock_stopped, int64_t now)
             ESP_LOGD(TAG, "wifi mac time delta: %u", diff);
         }
     }
+}
+
+IRAM_ATTR void esp_phy_common_clock_enable(void)
+{
+    wifi_bt_common_module_enable();
+}
+
+IRAM_ATTR void esp_phy_common_clock_disable(void)
+{
+    wifi_bt_common_module_disable();
 }
 
 esp_err_t esp_phy_rf_init(const esp_phy_init_data_t* init_data, esp_phy_calibration_mode_t mode, 
@@ -150,7 +173,8 @@ esp_err_t esp_phy_rf_init(const esp_phy_init_data_t* init_data, esp_phy_calibrat
             // Update WiFi MAC time before WiFi/BT common clock is enabled
             phy_update_wifi_mac_time(false, s_phy_rf_en_ts);
             // Enable WiFi/BT common peripheral clock
-            periph_module_enable(PERIPH_WIFI_BT_COMMON_MODULE);
+            //periph_module_enable(PERIPH_WIFI_BT_COMMON_MODULE);
+            esp_phy_common_clock_enable();
             phy_set_wifi_mode_only(0);
 
             if (ESP_CAL_DATA_CHECK_FAIL == register_chipv7_phy(init_data, calibration_data, mode)) {
@@ -171,7 +195,6 @@ esp_err_t esp_phy_rf_init(const esp_phy_init_data_t* init_data, esp_phy_calibrat
         uint32_t phy_bt_wifi_mask = BIT(PHY_BT_MODULE) | BIT(PHY_WIFI_MODULE);
         if ((s_module_phy_rf_init & phy_bt_wifi_mask) == phy_bt_wifi_mask) { //both wifi & bt enabled
             coex_init();
-            coex_preference_set(CONFIG_SW_COEXIST_PREFERENCE_VALUE);
             coex_resume();
         }
     }
@@ -235,7 +258,8 @@ esp_err_t esp_phy_rf_deinit(phy_rf_module_t module)
             // Update WiFi MAC time before disalbe WiFi/BT common peripheral clock
             phy_update_wifi_mac_time(true, esp_timer_get_time());
             // Disable WiFi/BT common peripheral clock. Do not disable clock for hardware RNG
-            periph_module_disable(PERIPH_WIFI_BT_COMMON_MODULE);
+            //periph_module_disable(PERIPH_WIFI_BT_COMMON_MODULE);
+            esp_phy_common_clock_disable();
         }
     }
 
@@ -597,6 +621,9 @@ static void esp_phy_reduce_tx_power(esp_phy_init_data_t* init_data)
 
 void esp_phy_load_cal_and_init(phy_rf_module_t module)
 {
+    char * phy_version = get_phy_version_str();
+    ESP_LOGI(TAG, "phy_version %s", phy_version);
+
     esp_phy_calibration_data_t* cal_data =
             (esp_phy_calibration_data_t*) calloc(sizeof(esp_phy_calibration_data_t), 1);
     if (cal_data == NULL) {

@@ -16,6 +16,7 @@
 #define __BTC_GAP_BT_H__
 
 #include "common/bt_target.h"
+#include "common/bt_defs.h"
 #include "esp_bt_defs.h"
 #include "esp_gap_bt_api.h"
 #include "btc/btc_task.h"
@@ -32,6 +33,7 @@ typedef enum {
     BTC_GAP_BT_KEY_NOTIF_EVT,
     BTC_GAP_BT_KEY_REQ_EVT,
     BTC_GAP_BT_READ_RSSI_DELTA_EVT,
+    BTC_GAP_BT_REMOVE_BOND_DEV_COMPLETE_EVT,
 }btc_gap_bt_evt_t;
 
 typedef enum {

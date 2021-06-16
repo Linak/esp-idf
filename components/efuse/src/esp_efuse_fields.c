@@ -35,7 +35,7 @@ uint8_t esp_efuse_get_chip_ver(void)
     uint8_t eco_bit0, eco_bit1, eco_bit2;
     esp_efuse_read_field_blob(ESP_EFUSE_CHIP_VER_REV1, &eco_bit0, 1);
     esp_efuse_read_field_blob(ESP_EFUSE_CHIP_VER_REV2, &eco_bit1, 1);
-    eco_bit2 = (REG_READ(APB_CTRL_DATE_REG) & 80000000) >> 31;
+    eco_bit2 = (REG_READ(APB_CTRL_DATE_REG) & 0x80000000) >> 31;
     uint32_t combine_value = (eco_bit2 << 2) | (eco_bit1 << 1) | eco_bit0;
     uint8_t chip_ver = 0;
     switch (combine_value) {
@@ -114,6 +114,33 @@ esp_err_t esp_efuse_apply_34_encoding(const uint8_t *in_bytes, uint32_t *out_wor
 
     return ESP_OK;
 }
+
+esp_err_t esp_efuse_disable_rom_download_mode(void)
+{
+    uint8_t dl_dis = 0;
+    uint8_t wr_dis_flash_crypt_cnt = 0;
+#ifndef CONFIG_ESP32_REV_MIN_3
+    /* Check if we support this revision at all */
+    if(esp_efuse_get_chip_ver() < 3) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+#endif
+
+    esp_efuse_read_field_blob(ESP_EFUSE_UART_DOWNLOAD_DIS, &dl_dis, 1);
+    if (dl_dis) {
+        return ESP_OK;
+    }
+
+    /* WR_DIS_FLASH_CRYPT_CNT also covers UART_DOWNLOAD_DIS on ESP32 */
+    esp_efuse_read_field_blob(ESP_EFUSE_WR_DIS_FLASH_CRYPT_CNT, &wr_dis_flash_crypt_cnt, 1);
+    if(wr_dis_flash_crypt_cnt) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    dl_dis = 1;
+    return esp_efuse_write_field_blob(ESP_EFUSE_UART_DOWNLOAD_DIS, &dl_dis, 1);
+}
+
 
 void esp_efuse_write_random_key(uint32_t blk_wdata0_reg)
 {

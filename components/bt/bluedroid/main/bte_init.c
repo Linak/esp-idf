@@ -116,7 +116,6 @@
 
 #if BTA_JV_INCLUDED==TRUE
 #include "bta_jv_int.h"
-tBTA_JV_CB *bta_jv_cb_ptr = NULL;
 #endif
 
 #if BTA_HL_INCLUDED == TRUE
@@ -332,8 +331,10 @@ void BTE_DeinitStack(void)
     bta_sdp_cb_ptr = NULL;
 #endif
 #if (defined BTA_JV_INCLUDED && BTA_JV_INCLUDED == TRUE)
-    osi_free(bta_jv_cb_ptr);
-    bta_jv_cb_ptr = NULL;
+    if (bta_jv_cb_ptr) {
+        osi_free(bta_jv_cb_ptr);
+        bta_jv_cb_ptr = NULL;
+    }
 #endif //JV
 #if (defined BTA_HF_INCLUDED && BTA_HF_INCLUDED == TRUE)
     osi_free(bta_hf_client_cb_ptr);
@@ -366,4 +367,9 @@ void BTE_DeinitStack(void)
 #if (defined(A2D_INCLUDED) && A2D_INCLUDED == TRUE)
     A2D_Deinit();
 #endif
+
+#if (defined(RFCOMM_INCLUDED) && RFCOMM_INCLUDED == TRUE)
+    RFCOMM_Deinit();
+#endif
+
 }

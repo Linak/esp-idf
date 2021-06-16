@@ -411,6 +411,19 @@ extern int PORT_FlowControl (UINT16 handle, BOOLEAN enable);
 
 /*******************************************************************************
 **
+** Function         PORT_FlowControl_GiveCredit
+**
+** Description      This function gives specified credits to the peer
+**
+** Parameters:      handle        - Handle returned in the RFCOMM_CreateConnection
+**                  enable        - enables data flow
+**                  credits_given - credits to give
+**
+*******************************************************************************/
+extern int PORT_FlowControl_GiveCredit (UINT16 handle, BOOLEAN enable, UINT16 credits_given);
+
+/*******************************************************************************
+**
 ** Function         PORT_GetModemStatus
 **
 ** Description      This function retrieves modem control signals.  Normally
@@ -623,6 +636,17 @@ extern int PORT_Test (UINT16 handle, UINT8 *p_data, UINT16 len);
 *******************************************************************************/
 extern void RFCOMM_Init (void);
 
+/*******************************************************************************
+**
+** Function         RFCOMM_Deinit
+**
+** Description      This function is called to deinitialize the control block
+**                  for this layer.
+**
+** Returns          void
+**
+*******************************************************************************/
+extern void RFCOMM_Deinit(void);
 
 /*******************************************************************************
 **

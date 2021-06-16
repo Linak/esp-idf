@@ -95,7 +95,6 @@ static int esp_tcp_connect(const char *host, int hostlen, int port, int *sockfd,
         ESP_LOGE(TAG, "Failed to create socket (family %d socktype %d protocol %d)", res->ai_family, res->ai_socktype, res->ai_protocol);
         goto err_freeaddr;
     }
-    *sockfd = fd;
 
     void *addr_ptr;
     if (res->ai_family == AF_INET) {
@@ -117,6 +116,7 @@ static int esp_tcp_connect(const char *host, int hostlen, int port, int *sockfd,
             struct timeval tv;
             ms_to_timeval(cfg->timeout_ms, &tv);
             setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+            setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
         }
         if (cfg->non_block) {
             int flags = fcntl(fd, F_GETFL, 0);
@@ -125,12 +125,13 @@ static int esp_tcp_connect(const char *host, int hostlen, int port, int *sockfd,
     }
 
     ret = connect(fd, addr_ptr, res->ai_addrlen);
-    if (ret < 0 && !(errno == EINPROGRESS && cfg->non_block)) {
+    if (ret < 0 && !(errno == EINPROGRESS && cfg && cfg->non_block)) {
 
-        ESP_LOGE(TAG, "Failed to connnect to host (errno %d)", errno);
+        ESP_LOGE(TAG, "Failed to connect to host (errno %d)", errno);
         goto err_freesocket;
     }
 
+    *sockfd = fd;
     freeaddrinfo(res);
     return 0;
 
@@ -222,14 +223,12 @@ static void mbedtls_cleanup(esp_tls_t *tls)
     mbedtls_ssl_config_free(&tls->conf);
     mbedtls_ctr_drbg_free(&tls->ctr_drbg);
     mbedtls_ssl_free(&tls->ssl);
-    mbedtls_net_free(&tls->server_fd);
 }
 
 static int create_ssl_handle(esp_tls_t *tls, const char *hostname, size_t hostlen, const esp_tls_cfg_t *cfg)
 {
     int ret;
     
-    mbedtls_net_init(&tls->server_fd);
     tls->server_fd.fd = tls->sockfd;
     mbedtls_ssl_init(&tls->ssl);
     mbedtls_ctr_drbg_init(&tls->ctr_drbg);
@@ -242,18 +241,26 @@ static int create_ssl_handle(esp_tls_t *tls, const char *hostname, size_t hostle
         goto exit;        
     }
     
-    /* Hostname set here should match CN in server certificate */    
-    char *use_host = strndup(hostname, hostlen);
-    if (!use_host) {
-        goto exit;
-    }
+    if (!cfg->skip_common_name) {
+        char *use_host = NULL;
+        if (cfg->common_name != NULL) {
+            use_host = strndup(cfg->common_name, strlen(cfg->common_name));
+        } else {
+            use_host = strndup(hostname, hostlen);
+        }
 
-    if ((ret = mbedtls_ssl_set_hostname(&tls->ssl, use_host)) != 0) {
-        ESP_LOGE(TAG, "mbedtls_ssl_set_hostname returned -0x%x", -ret);
+        if (use_host == NULL) {
+            goto exit;
+        }
+
+        /* Hostname set here should match CN in server certificate */
+        if ((ret = mbedtls_ssl_set_hostname(&tls->ssl, use_host)) != 0) {
+            ESP_LOGE(TAG, "mbedtls_ssl_set_hostname returned -0x%x", -ret);
+            free(use_host);
+            goto exit;
+        }
         free(use_host);
-        goto exit;
     }
-    free(use_host);
 
     if ((ret = mbedtls_ssl_config_defaults(&tls->conf,
                     MBEDTLS_SSL_IS_CLIENT,
@@ -345,7 +352,9 @@ void esp_tls_conn_delete(esp_tls_t *tls)
 {
     if (tls != NULL) {
         mbedtls_cleanup(tls);
-        if (tls->sockfd) {
+        if (tls->is_tls) {
+            mbedtls_net_free(&tls->server_fd);
+        } else if (tls->sockfd >= 0) {
             close(tls->sockfd);
         }
         free(tls);
@@ -378,13 +387,16 @@ static int esp_tls_low_level_conn(const char *hostname, int hostlen, int port, c
     and in case of blocking connect these cases will get executed one after the other */
     switch (tls->conn_state) {
         case ESP_TLS_INIT:
-            ;
-            int sockfd;
-            int ret = esp_tcp_connect(hostname, hostlen, port, &sockfd, cfg);
+
+            tls->sockfd = -1;
+            if (cfg != NULL) {
+                mbedtls_net_init(&tls->server_fd);
+                tls->is_tls = true;
+            }
+            int ret = esp_tcp_connect(hostname, hostlen, port, &tls->sockfd, cfg);
             if (ret < 0) {
                 return -1;
             }
-            tls->sockfd = sockfd;
             if (!cfg) {
                 tls->read = tcp_read;
                 tls->write = tcp_write;
@@ -475,6 +487,7 @@ esp_tls_t *esp_tls_conn_new(const char *hostname, int hostlen, int port, const e
     }
     /* esp_tls_conn_new() API establishes connection in a blocking manner thus this loop ensures that esp_tls_conn_new()
        API returns only after connection is established unless there is an error*/
+    size_t start = xTaskGetTickCount();
     while (1) {
         int ret = esp_tls_low_level_conn(hostname, hostlen, port, cfg, tls);
         if (ret == 1) {
@@ -483,6 +496,14 @@ esp_tls_t *esp_tls_conn_new(const char *hostname, int hostlen, int port, const e
             esp_tls_conn_delete(tls);
             ESP_LOGE(TAG, "Failed to open new connection");
             return NULL;
+        } else if (ret == 0 && cfg->timeout_ms >= 0) {
+            size_t timeout_ticks = pdMS_TO_TICKS(cfg->timeout_ms);
+            uint32_t expired = xTaskGetTickCount() - start;
+            if (expired >= timeout_ticks) {
+                esp_tls_conn_delete(tls);
+                ESP_LOGE(TAG, "Failed to open new connection in specified timeout");
+                return NULL;
+            }
         }
     }
     return NULL;

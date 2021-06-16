@@ -223,6 +223,7 @@ endmenu  # Bootloader
 
 
 menu "Security features"
+    visible if !IDF_CMAKE
 
     # These three are the actual options to check in code,
     # selected by the displayed options
@@ -505,4 +506,39 @@ menu "Security features"
                 Only set this option in testing environments.
 
     endmenu  # Potentially Insecure
+
+    config FLASH_ENCRYPTION_DISABLE_PLAINTEXT
+        bool "Disable serial reflashing of plaintext firmware"
+        depends on FLASH_ENCRYPTION_ENABLED
+        default y if SECURE_BOOT_ENABLED
+        default n if !SECURE_BOOT_ENABLED
+        help
+            If this option is enabled, flash encryption is permanently enabled after first boot by write-protecting
+            the FLASH_CRYPT_CNT efuse. This is the recommended configuration for a secure production system.
+
+            If this option is disabled, FLASH_CRYPT_CNT is left writeable and up to 4 plaintext re-flashes are allowed.
+            An attacker with physical access will be able to read out encrypted flash contents until all plaintext
+            re-flashes have been used up.
+
+            If this option is disabled and hardware Secure Boot is enabled, Secure Boot must be configured in
+            Reflashable mode so that a new Secure Boot digest can be flashed at the same time as plaintext firmware.
+            This combination is not secure and should not be used for a production system.
+
+    config SECURE_DISABLE_ROM_DL_MODE
+        bool "Permanently disable ROM Download Mode"
+        depends on ESP32_REV_MIN_3
+        default n
+        help
+            If set, during startup the app will burn an eFuse bit to permanently disable the UART ROM
+            Download Mode. This prevents any future use of esptool.py, espefuse.py and similar tools.
+
+            Once disabled, if the SoC is booted with strapping pins set for ROM Download Mode
+            then an error is printed instead.
+
+            It is recommended to enable this option in any production application where Flash
+            Encryption and/or Secure Boot is enabled and access to Download Mode is not required.
+
+            It is also possible to permanently disable Download Mode by calling
+            esp_efuse_disable_rom_download_mode() at runtime.
+
 endmenu  # Security features

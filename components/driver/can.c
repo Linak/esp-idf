@@ -21,6 +21,8 @@
 #include "esp_log.h"
 #include "esp_intr_alloc.h"
 #include "esp_pm.h"
+#include "esp_attr.h"
+#include "esp_heap_caps.h"
 #include "soc/dport_reg.h"
 #include "soc/can_struct.h"
 #include "driver/gpio.h"
@@ -42,14 +44,37 @@
 })
 #define CAN_SET_FLAG(var, mask)     ((var) |= (mask))
 #define CAN_RESET_FLAG(var, mask)   ((var) &= ~(mask))
+#ifdef CONFIG_CAN_ISR_IN_IRAM
+#define CAN_INLINE_ATTR     __attribute__((always_inline))
+#define CAN_ISR_ATTR        IRAM_ATTR
+#define CAN_MALLOC_CAPS     (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#else
+#define CAN_INLINE_ATTR
 #define CAN_TAG "CAN"
+#define CAN_ISR_ATTR
+#define CAN_MALLOC_CAPS     MALLOC_CAP_DEFAULT
+#endif
+
+/*
+ * Baud Rate Prescaler Divider config/values. The BRP_DIV bit is located in the
+ * CAN interrupt enable register, and is only available in ESP32 Revision 2 or
+ * later. Setting this bit will cause the APB clock to be prescaled (divided) by
+ * a factor 2, before having the BRP applied. This will allow for lower bit rates
+ * to be achieved.
+ */
+#define BRP_DIV_EN_THRESH           128         //A BRP config value large this this will need to enable brp_div
+#define BRP_DIV_EN_BIT              0x10        //Bit mask for brp_div in the interrupt register
+//When brp_div is enabled, the BRP config value must be any multiple of 4 between 132 and 256
+#define BRP_CHECK_WITH_DIV(brp)     ((brp) >= 132 && (brp) <= 256 && ((brp) & 0x3) == 0)
+//When brp_div is disabled, the BRP config value must be any even number between 2 to 128
+#define BRP_CHECK_NO_DIV(brp)       ((brp) >= 2 && (brp) <= 128 && ((brp) & 0x1) == 0)
 
 //Driver default config/values
 #define DRIVER_DEFAULT_EWL          96          //Default Error Warning Limit value
 #define DRIVER_DEFAULT_TEC          0           //TX Error Counter starting value
 #define DRIVER_DEFAULT_REC          0           //RX Error Counter starting value
 #define DRIVER_DEFAULT_CLKOUT_DIV   14          //APB CLK divided by two
-#define DRIVER_DEFAULT_INTERRUPTS   0xE7        //Exclude data overrun
+#define DRIVER_DEFAULT_INTERRUPTS   0xE7        //Exclude data overrun (bit[3]) and brp_div (bit[4])
 #define DRIVER_DEFAULT_ERR_PASS_CNT 128         //Error counter threshold for error passive
 
 //Command Bit Masks
@@ -121,6 +146,13 @@ typedef struct {
     uint32_t bus_error_count;
     intr_handle_t isr_handle;
     //TX and RX
+#ifdef CONFIG_CAN_ISR_IN_IRAM
+    void *tx_queue_buff;
+    void *tx_queue_struct;
+    void *rx_queue_buff;
+    void *rx_queue_struct;
+    void *semphr_struct;
+#endif
     QueueHandle_t tx_queue;
     QueueHandle_t rx_queue;
     int tx_msg_count;
@@ -137,12 +169,14 @@ typedef struct {
 
 static can_obj_t *p_can_obj = NULL;
 static portMUX_TYPE can_spinlock = portMUX_INITIALIZER_UNLOCKED;
-#define CAN_ENTER_CRITICAL()  portENTER_CRITICAL(&can_spinlock)
-#define CAN_EXIT_CRITICAL()   portEXIT_CRITICAL(&can_spinlock)
+#define CAN_ENTER_CRITICAL_ISR()    portENTER_CRITICAL_ISR(&can_spinlock)
+#define CAN_EXIT_CRITICAL_ISR()     portEXIT_CRITICAL_ISR(&can_spinlock)
+#define CAN_ENTER_CRITICAL()        portENTER_CRITICAL(&can_spinlock)
+#define CAN_EXIT_CRITICAL()         portEXIT_CRITICAL(&can_spinlock)
 
 /* ------------------- Configuration Register Functions---------------------- */
 
-static inline esp_err_t can_enter_reset_mode()
+static inline CAN_INLINE_ATTR esp_err_t can_enter_reset_mode()
 {
     /* Enter reset mode (required to write to configuration registers). Reset mode
        also prevents all CAN activity on the current module and is automatically
@@ -167,7 +201,7 @@ static inline void can_config_pelican()
     CAN.clock_divider_reg.can_mode = 1;
 }
 
-static inline void can_config_mode(can_mode_t mode)
+static CAN_ISR_ATTR void can_config_mode(can_mode_t mode)
 {
     //Configure CAN mode of operation
     can_mode_reg_t mode_reg;
@@ -199,7 +233,7 @@ static inline void can_config_bus_timing(uint32_t brp, uint32_t sjw, uint32_t ts
        - SJW (1 to 4) is number of T_scl to shorten/lengthen for bit synchronization
        - TSEG_1 (1 to 16) is number of T_scl in a bit time before sample point
        - TSEG_2 (1 to 8) is number of T_scl in a bit time after sample point
-       - triple_sampling will cause each bit time to be sampled 3 times*/
+       - triple_sampling will cause each bit time to be sampled 3 times */
     can_bus_tim_0_reg_t timing_reg_0;
     can_bus_tim_1_reg_t timing_reg_1;
     timing_reg_0.baud_rate_prescaler = (brp / 2) - 1;
@@ -265,12 +299,12 @@ static inline void can_config_clk_out(uint32_t divider)
 
 /* ---------------------- Runtime Register Functions------------------------- */
 
-static inline void can_set_command(uint8_t commands)
+static inline CAN_INLINE_ATTR void can_set_command(uint8_t commands)
 {
     CAN.command_reg.val = commands;
 }
 
-static void can_set_tx_buffer_and_transmit(can_frame_t *frame)
+static CAN_ISR_ATTR void can_set_tx_buffer_and_transmit(can_frame_t *frame)
 {
     //Copy frame structure into TX buffer registers
     for (int i = 0; i < FRAME_MAX_LEN; i++) {
@@ -287,29 +321,29 @@ static void can_set_tx_buffer_and_transmit(can_frame_t *frame)
     can_set_command(command);
 }
 
-static inline uint32_t can_get_status()
+static inline CAN_INLINE_ATTR uint32_t can_get_status()
 {
     return CAN.status_reg.val;
 }
 
-static inline uint32_t can_get_interrupt_reason()
+static inline CAN_INLINE_ATTR uint32_t can_get_interrupt_reason()
 {
     return CAN.interrupt_reg.val;
 }
 
-static inline uint32_t can_get_arbitration_lost_capture()
+static inline CAN_INLINE_ATTR uint32_t can_get_arbitration_lost_capture()
 {
     return CAN.arbitration_lost_captue_reg.val;
     //Todo: ALC read only to re-arm arb lost interrupt. Add function to decode ALC
 }
 
-static inline uint32_t can_get_error_code_capture()
+static inline CAN_INLINE_ATTR uint32_t can_get_error_code_capture()
 {
     return CAN.error_code_capture_reg.val;
     //Todo: ECC read only to re-arm bus error interrupt. Add function to decode ECC
 }
 
-static inline void can_get_error_counters(uint32_t *tx_error_cnt, uint32_t *rx_error_cnt)
+static inline CAN_INLINE_ATTR void can_get_error_counters(uint32_t *tx_error_cnt, uint32_t *rx_error_cnt)
 {
     if (tx_error_cnt != NULL) {
         *tx_error_cnt = CAN.tx_error_counter_reg.byte;
@@ -319,7 +353,7 @@ static inline void can_get_error_counters(uint32_t *tx_error_cnt, uint32_t *rx_e
     }
 }
 
-static inline void can_get_rx_buffer_and_clear(can_frame_t *frame)
+static CAN_ISR_ATTR void can_get_rx_buffer_and_clear(can_frame_t *frame)
 {
     //Copy RX buffer registers into frame structure
     for (int i = 0; i < FRAME_MAX_LEN; i++) {
@@ -329,19 +363,20 @@ static inline void can_get_rx_buffer_and_clear(can_frame_t *frame)
     can_set_command(CMD_RELEASE_RX_BUFF);
 }
 
-static inline uint32_t can_get_rx_message_counter()
+static inline CAN_INLINE_ATTR uint32_t can_get_rx_message_counter()
 {
     return CAN.rx_message_counter_reg.val;
 }
 
 /* -------------------- Interrupt and Alert Handlers ------------------------ */
 
-static void can_alert_handler(uint32_t alert_code, int *alert_req)
+static CAN_ISR_ATTR void can_alert_handler(uint32_t alert_code, int *alert_req)
 {
     if (p_can_obj->alerts_enabled & alert_code) {
         //Signify alert has occurred
         CAN_SET_FLAG(p_can_obj->alerts_triggered, alert_code);
         *alert_req = 1;
+#ifndef CONFIG_CAN_ISR_IN_IRAM     //Only log if ISR is not in IRAM
         if (p_can_obj->alerts_enabled & CAN_ALERT_AND_LOG) {
             if (alert_code >= ALERT_LOG_LEVEL_ERROR) {
                 ESP_EARLY_LOGE(CAN_TAG, "Alert %d", alert_code);
@@ -351,10 +386,11 @@ static void can_alert_handler(uint32_t alert_code, int *alert_req)
                 ESP_EARLY_LOGI(CAN_TAG, "Alert %d", alert_code);
             }
         }
+#endif
     }
 }
 
-static void can_intr_handler_err_warn(can_status_reg_t *status, BaseType_t *task_woken, int *alert_req)
+static CAN_ISR_ATTR void can_intr_handler_err_warn(can_status_reg_t *status, BaseType_t *task_woken, int *alert_req)
 {
     if (status->bus) {
         if (status->error) {
@@ -376,7 +412,8 @@ static void can_intr_handler_err_warn(can_status_reg_t *status, BaseType_t *task
             can_alert_handler(CAN_ALERT_ABOVE_ERR_WARN, alert_req);
         } else if (p_can_obj->control_flags & CTRL_FLAG_RECOVERING) {
             //Bus recovery complete.
-            can_enter_reset_mode();
+            esp_err_t err = can_enter_reset_mode();
+            assert(err == ESP_OK);
             //Reset and set flags to the equivalent of the stopped state
             CAN_RESET_FLAG(p_can_obj->control_flags, CTRL_FLAG_RECOVERING | CTRL_FLAG_ERR_WARN |
                                                      CTRL_FLAG_ERR_PASSIVE | CTRL_FLAG_BUS_OFF |
@@ -391,7 +428,7 @@ static void can_intr_handler_err_warn(can_status_reg_t *status, BaseType_t *task
     }
 }
 
-static void can_intr_handler_err_passive(int *alert_req)
+static inline CAN_INLINE_ATTR void can_intr_handler_err_passive(int *alert_req)
 {
     uint32_t tec, rec;
     can_get_error_counters(&tec, &rec);
@@ -406,7 +443,7 @@ static void can_intr_handler_err_passive(int *alert_req)
     }
 }
 
-static void can_intr_handler_bus_err(int *alert_req)
+static inline CAN_INLINE_ATTR void can_intr_handler_bus_err(int *alert_req)
 {
     // ECC register is read to re-arm bus error interrupt. ECC is not used
     (void) can_get_error_code_capture();
@@ -414,7 +451,7 @@ static void can_intr_handler_bus_err(int *alert_req)
     can_alert_handler(CAN_ALERT_BUS_ERROR, alert_req);
 }
 
-static void can_intr_handler_arb_lost(int *alert_req)
+static inline CAN_INLINE_ATTR void can_intr_handler_arb_lost(int *alert_req)
 {
     //ALC register is read to re-arm arb lost interrupt. ALC is not used
     (void) can_get_arbitration_lost_capture();
@@ -422,7 +459,7 @@ static void can_intr_handler_arb_lost(int *alert_req)
     can_alert_handler(CAN_ALERT_ARB_LOST, alert_req);
 }
 
-static void can_intr_handler_rx(BaseType_t *task_woken, int *alert_req)
+static inline CAN_INLINE_ATTR CAN_ISR_ATTR void can_intr_handler_rx(BaseType_t *task_woken, int *alert_req)
 {
     can_rx_msg_cnt_reg_t msg_count_reg;
     msg_count_reg.val = can_get_rx_message_counter();
@@ -442,7 +479,7 @@ static void can_intr_handler_rx(BaseType_t *task_woken, int *alert_req)
     //Todo: Check for data overrun of RX FIFO, then trigger alert
 }
 
-static void can_intr_handler_tx(can_status_reg_t *status, int *alert_req)
+static CAN_ISR_ATTR void can_intr_handler_tx(can_status_reg_t *status, int *alert_req)
 {
     //Handle previously transmitted frame
     if (status->tx_complete) {
@@ -454,13 +491,17 @@ static void can_intr_handler_tx(can_status_reg_t *status, int *alert_req)
 
     //Update TX message count
     p_can_obj->tx_msg_count--;
-    configASSERT(p_can_obj->tx_msg_count >= 0);     //Sanity check
+    assert(p_can_obj->tx_msg_count >= 0);     //Sanity check
 
     //Check if there are more frames to transmit
     if (p_can_obj->tx_msg_count > 0 && p_can_obj->tx_queue != NULL) {
         can_frame_t frame;
-        configASSERT(xQueueReceiveFromISR(p_can_obj->tx_queue, &frame, NULL) == pdTRUE);
-        can_set_tx_buffer_and_transmit(&frame);
+        int res = xQueueReceiveFromISR(p_can_obj->tx_queue, &frame, NULL);
+        if (res == pdTRUE) {
+            can_set_tx_buffer_and_transmit(&frame);
+        } else {
+            assert(false && "failed to get a frame from TX queue");
+        }
     } else {
         //No more frames to transmit
         CAN_RESET_FLAG(p_can_obj->control_flags, CTRL_FLAG_TX_BUFF_OCCUPIED);
@@ -468,14 +509,14 @@ static void can_intr_handler_tx(can_status_reg_t *status, int *alert_req)
     }
 }
 
-static void can_intr_handler_main(void *arg)
+static CAN_ISR_ATTR void can_intr_handler_main(void *arg)
 {
     BaseType_t task_woken = pdFALSE;
     int alert_req = 0;
     can_status_reg_t status;
     can_intr_reg_t intr_reason;
 
-    CAN_ENTER_CRITICAL();
+    CAN_ENTER_CRITICAL_ISR();
     status.val = can_get_status();
     intr_reason.val = (p_can_obj != NULL) ? can_get_interrupt_reason() : 0; //Incase intr occurs whilst driver is being uninstalled
 
@@ -510,7 +551,7 @@ static void can_intr_handler_main(void *arg)
     }
     /* Todo: Check possible bug where transmitting self reception request then
        clearing rx buffer will cancel the transmission. */
-    CAN_EXIT_CRITICAL();
+    CAN_EXIT_CRITICAL_ISR();
 
     if (p_can_obj->alert_semphr != NULL && alert_req) {
         //Give semaphore if alerts were triggered
@@ -521,7 +562,7 @@ static void can_intr_handler_main(void *arg)
     }
 }
 
-/* ---------------------- Frame and GPIO functions  ------------------------- */
+/* -------------------------- Helper functions  ----------------------------- */
 
 static void can_format_frame(uint32_t id, uint8_t dlc, const uint8_t *data, uint32_t flags, can_frame_t *tx_frame)
 {
@@ -614,6 +655,93 @@ static void can_configure_gpio(gpio_num_t tx, gpio_num_t rx, gpio_num_t clkout, 
     }
 }
 
+static void can_free_driver_obj(can_obj_t *p_obj)
+{
+    //Free driver object and any dependent SW resources it uses (queues, semaphores etc)
+#ifdef CONFIG_PM_ENABLE
+    if (p_obj->pm_lock != NULL) {
+        ESP_ERROR_CHECK(esp_pm_lock_delete(p_obj->pm_lock));
+    }
+#endif
+    //Delete queues and semaphores
+    if (p_obj->tx_queue != NULL) {
+        vQueueDelete(p_obj->tx_queue);
+    }
+    if (p_obj->rx_queue != NULL) {
+        vQueueDelete(p_obj->rx_queue);
+    }
+    if (p_obj->alert_semphr != NULL) {
+        vSemaphoreDelete(p_obj->alert_semphr);
+    }
+#ifdef CONFIG_CAN_ISR_IN_IRAM
+    //Free memory used by static queues and semaphores. free() allows freeing NULL pointers
+    free(p_obj->tx_queue_buff);
+    free(p_obj->tx_queue_struct);
+    free(p_obj->rx_queue_buff);
+    free(p_obj->rx_queue_struct);
+    free(p_obj->semphr_struct);
+#endif  //CONFIG_CAN_ISR_IN_IRAM
+    free(p_obj);
+}
+
+static can_obj_t *can_alloc_driver_obj(uint32_t tx_queue_len, uint32_t rx_queue_len)
+{
+    can_obj_t *p_obj = heap_caps_calloc(1, sizeof(can_obj_t), CAN_MALLOC_CAPS);
+    if (p_obj == NULL) {
+        return NULL;
+    }
+#ifdef CONFIG_CAN_ISR_IN_IRAM
+    //Allocate memory for queues and semaphores in DRAM
+    if (tx_queue_len > 0) {
+        p_obj->tx_queue_buff = heap_caps_calloc(tx_queue_len, sizeof(can_frame_t), CAN_MALLOC_CAPS);
+        p_obj->tx_queue_struct = heap_caps_calloc(1, sizeof(StaticQueue_t), CAN_MALLOC_CAPS);
+        if (p_obj->tx_queue_buff == NULL || p_obj->tx_queue_struct == NULL) {
+            goto cleanup;
+        }
+    }
+    p_obj->rx_queue_buff = heap_caps_calloc(rx_queue_len, sizeof(can_frame_t), CAN_MALLOC_CAPS);
+    p_obj->rx_queue_struct = heap_caps_calloc(1, sizeof(StaticQueue_t), CAN_MALLOC_CAPS);
+    p_obj->semphr_struct = heap_caps_calloc(1, sizeof(StaticSemaphore_t), CAN_MALLOC_CAPS);
+    if (p_obj->rx_queue_buff == NULL || p_obj->rx_queue_struct == NULL || p_obj->semphr_struct == NULL) {
+        goto cleanup;
+    }
+    //Create static queues and semaphores
+    if (tx_queue_len > 0) {
+        p_obj->tx_queue = xQueueCreateStatic(tx_queue_len, sizeof(can_frame_t), p_obj->tx_queue_buff, p_obj->tx_queue_struct);
+        if (p_obj->tx_queue == NULL) {
+            goto cleanup;
+        }
+    }
+    p_obj->rx_queue = xQueueCreateStatic(rx_queue_len, sizeof(can_frame_t), p_obj->rx_queue_buff, p_obj->rx_queue_struct);
+    p_obj->alert_semphr = xSemaphoreCreateBinaryStatic(p_obj->semphr_struct);
+    if (p_obj->rx_queue == NULL || p_obj->alert_semphr == NULL) {
+        goto cleanup;
+    }
+
+#else   //CONFIG_CAN_ISR_IN_IRAM
+    if (tx_queue_len > 0) {
+        p_obj->tx_queue = xQueueCreate(tx_queue_len, sizeof(can_frame_t));
+    }
+    p_obj->rx_queue = xQueueCreate(rx_queue_len, sizeof(can_frame_t));
+    p_obj->alert_semphr = xSemaphoreCreateBinary();
+    if ((tx_queue_len > 0 && p_obj->tx_queue == NULL) || p_obj->rx_queue == NULL || p_obj->alert_semphr == NULL) {
+        goto cleanup;
+    }
+#endif  //CONFIG_CAN_ISR_IN_IRAM
+
+#ifdef CONFIG_PM_ENABLE
+    esp_err_t pm_err = esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "can", &(p_obj->pm_lock));
+    if (pm_err != ESP_OK ) {
+        goto cleanup;
+    }
+#endif
+    return p_obj;
+
+cleanup:
+    can_free_driver_obj(p_obj);
+    return NULL;
+}
+
 /* ---------------------------- Public Functions ---------------------------- */
 
 esp_err_t can_driver_install(const can_general_config_t *g_config, const can_timing_config_t *t_config, const can_filter_config_t *f_config)
@@ -625,43 +753,32 @@ esp_err_t can_driver_install(const can_general_config_t *g_config, const can_tim
     CAN_CHECK(g_config->rx_queue_len > 0, ESP_ERR_INVALID_ARG);
     CAN_CHECK(g_config->tx_io >= 0 && g_config->tx_io < GPIO_NUM_MAX, ESP_ERR_INVALID_ARG);
     CAN_CHECK(g_config->rx_io >= 0 && g_config->rx_io < GPIO_NUM_MAX, ESP_ERR_INVALID_ARG);
+#if (CONFIG_ESP32_REV_MIN >= 2)
+    //ESP32 revision 2 or later chips have a brp_div bit. Check that the BRP config value is valid when brp_div is enabled or disabled
+    CAN_CHECK(BRP_CHECK_WITH_DIV(t_config->brp) || BRP_CHECK_NO_DIV(t_config->brp), ESP_ERR_INVALID_ARG);
+#else
+    CAN_CHECK(BRP_CHECK_NO_DIV(t_config->brp), ESP_ERR_INVALID_ARG);
+#endif
+#ifndef CONFIG_CAN_ISR_IN_IRAM
+    CAN_CHECK(!(g_config->intr_flags & ESP_INTR_FLAG_IRAM), ESP_ERR_INVALID_ARG);
+#endif
+    CAN_ENTER_CRITICAL();
+    CAN_CHECK_FROM_CRIT(p_can_obj == NULL, ESP_ERR_INVALID_STATE);
+    CAN_EXIT_CRITICAL();
+
 
     esp_err_t ret;
     can_obj_t *p_can_obj_dummy;
 
-    //Create a CAN object
-    p_can_obj_dummy = calloc(1, sizeof(can_obj_t));
+    //Create a CAN object (including queues and semaphores)
+    p_can_obj_dummy = can_alloc_driver_obj(g_config->tx_queue_len, g_config->rx_queue_len);
     CAN_CHECK(p_can_obj_dummy != NULL, ESP_ERR_NO_MEM);
 
-    //Initialize queues, semaphores, and power management locks
-    p_can_obj_dummy->tx_queue = (g_config->tx_queue_len > 0) ? xQueueCreate(g_config->tx_queue_len, sizeof(can_frame_t)) : NULL;
-    p_can_obj_dummy->rx_queue = xQueueCreate(g_config->rx_queue_len, sizeof(can_frame_t));
-    p_can_obj_dummy->alert_semphr = xSemaphoreCreateBinary();
-    if ((g_config->tx_queue_len > 0 && p_can_obj_dummy->tx_queue == NULL) ||
-        p_can_obj_dummy->rx_queue == NULL || p_can_obj_dummy->alert_semphr == NULL) {
-        ret = ESP_ERR_NO_MEM;
-        goto err;
-    }
-#ifdef CONFIG_PM_ENABLE
-    esp_err_t pm_err = esp_pm_lock_create(ESP_PM_APB_FREQ_MAX, 0, "can", &(p_can_obj_dummy->pm_lock));
-    if (pm_err != ESP_OK ) {
-        ret = pm_err;
-        goto err;
-    }
-#endif
-
-    //Initialize flags and variables
+    //Initialize flags and variables. All other members are already set to zero by can_alloc_driver_obj()
     p_can_obj_dummy->control_flags = CTRL_FLAG_STOPPED;
     p_can_obj_dummy->control_flags |= (g_config->mode == CAN_MODE_NO_ACK) ? CTRL_FLAG_SELF_TEST : 0;
     p_can_obj_dummy->control_flags |= (g_config->mode == CAN_MODE_LISTEN_ONLY) ? CTRL_FLAG_LISTEN_ONLY : 0;
-    p_can_obj_dummy->tx_msg_count = 0;
-    p_can_obj_dummy->rx_msg_count = 0;
-    p_can_obj_dummy->tx_failed_count = 0;
-    p_can_obj_dummy->rx_missed_count = 0;
-    p_can_obj_dummy->arb_lost_count = 0;
-    p_can_obj_dummy->bus_error_count = 0;
     p_can_obj_dummy->alerts_enabled = g_config->alerts_enabled;
-    p_can_obj_dummy->alerts_triggered = 0;
 
     //Initialize CAN peripheral registers, and allocate interrupt
     CAN_ENTER_CRITICAL();
@@ -673,51 +790,40 @@ esp_err_t can_driver_install(const can_general_config_t *g_config, const can_tim
         ret = ESP_ERR_INVALID_STATE;
         goto err;
     }
+    periph_module_reset(PERIPH_CAN_MODULE);
     periph_module_enable(PERIPH_CAN_MODULE);            //Enable APB CLK to CAN peripheral
-    configASSERT(can_enter_reset_mode() == ESP_OK);     //Must enter reset mode to write to config registers
+    esp_err_t err = can_enter_reset_mode();              //Must enter reset mode to write to config registers
+    assert(err == ESP_OK);
     can_config_pelican();                               //Use PeliCAN addresses
     /* Note: REC is allowed to increase even in reset mode. Listen only mode
        will freeze REC. The desired mode will be set when can_start() is called. */
     can_config_mode(CAN_MODE_LISTEN_ONLY);
+#if (CONFIG_ESP32_REV_MIN >= 2)
+    //If the BRP config value is large enough, the brp_div bit must be enabled to achieve the same effective baud rate prescaler
+    can_config_interrupts((t_config->brp > BRP_DIV_EN_THRESH) ? DRIVER_DEFAULT_INTERRUPTS | BRP_DIV_EN_BIT : DRIVER_DEFAULT_INTERRUPTS);
+    can_config_bus_timing((t_config->brp > BRP_DIV_EN_THRESH) ? t_config->brp/2 : t_config->brp, t_config->sjw, t_config->tseg_1, t_config->tseg_2, t_config->triple_sampling);
+#else
     can_config_interrupts(DRIVER_DEFAULT_INTERRUPTS);
     can_config_bus_timing(t_config->brp, t_config->sjw, t_config->tseg_1, t_config->tseg_2, t_config->triple_sampling);
+#endif
     can_config_error(DRIVER_DEFAULT_EWL, DRIVER_DEFAULT_REC, DRIVER_DEFAULT_TEC);
     can_config_acceptance_filter(f_config->acceptance_code, f_config->acceptance_mask, f_config->single_filter);
     can_config_clk_out(g_config->clkout_divider);
-    //Allocate GPIO and Interrupts
-    can_configure_gpio(g_config->tx_io, g_config->rx_io, g_config->clkout_io, g_config->bus_off_io);
     (void) can_get_interrupt_reason();                  //Read interrupt reg to clear it before allocating ISR
-    ESP_ERROR_CHECK(esp_intr_alloc(ETS_CAN_INTR_SOURCE, 0, can_intr_handler_main, NULL, &p_can_obj->isr_handle));
     //Todo: Allow interrupt to be registered to specified CPU
     CAN_EXIT_CRITICAL();
+
+    //Allocate GPIO and Interrupts
+    can_configure_gpio(g_config->tx_io, g_config->rx_io, g_config->clkout_io, g_config->bus_off_io);
+    ESP_ERROR_CHECK(esp_intr_alloc(ETS_CAN_INTR_SOURCE, g_config->intr_flags, can_intr_handler_main, NULL, &p_can_obj->isr_handle));
 
 #ifdef CONFIG_PM_ENABLE
     ESP_ERROR_CHECK(esp_pm_lock_acquire(p_can_obj->pm_lock));     //Acquire pm_lock to keep APB clock at 80MHz
 #endif
     return ESP_OK;      //CAN module is still in reset mode, users need to call can_start() afterwards
 
-    err:
-    //Cleanup CAN object and return error
-    if (p_can_obj_dummy != NULL) {
-        if (p_can_obj_dummy->tx_queue != NULL) {
-            vQueueDelete(p_can_obj_dummy->tx_queue);
-            p_can_obj_dummy->tx_queue = NULL;
-        }
-        if (p_can_obj_dummy->rx_queue != NULL) {
-            vQueueDelete(p_can_obj_dummy->rx_queue);
-            p_can_obj_dummy->rx_queue = NULL;
-        }
-        if (p_can_obj_dummy->alert_semphr != NULL) {
-            vSemaphoreDelete(p_can_obj_dummy->alert_semphr);
-            p_can_obj_dummy->alert_semphr = NULL;
-        }
-#ifdef CONFIG_PM_ENABLE
-        if (p_can_obj_dummy->pm_lock != NULL) {
-            ESP_ERROR_CHECK(esp_pm_lock_delete(p_can_obj_dummy->pm_lock));
-        }
-#endif
-        free(p_can_obj_dummy);
-    }
+err:
+    can_free_driver_obj(p_can_obj_dummy);
     return ret;
 }
 
@@ -729,31 +835,23 @@ esp_err_t can_driver_uninstall()
     //Check state
     CAN_CHECK_FROM_CRIT(p_can_obj != NULL, ESP_ERR_INVALID_STATE);
     CAN_CHECK_FROM_CRIT(p_can_obj->control_flags & (CTRL_FLAG_STOPPED | CTRL_FLAG_BUS_OFF), ESP_ERR_INVALID_STATE);
-    configASSERT(can_enter_reset_mode() == ESP_OK); //Enter reset mode to stop any CAN bus activity
+    esp_err_t err = can_enter_reset_mode();  //Enter reset mode to stop any CAN bus activity
+    assert(err == ESP_OK);
     //Clear registers by reading
     (void) can_get_interrupt_reason();
     (void) can_get_arbitration_lost_capture();
     (void) can_get_error_code_capture();
-
-    ESP_ERROR_CHECK(esp_intr_free(p_can_obj->isr_handle));  //Free interrupt
     periph_module_disable(PERIPH_CAN_MODULE);               //Disable CAN peripheral
     p_can_obj_dummy = p_can_obj;        //Use dummy to shorten critical section
     p_can_obj = NULL;
     CAN_EXIT_CRITICAL();
 
-    //Delete queues, semaphores, and power management locks
-    if (p_can_obj_dummy->tx_queue != NULL) {
-        vQueueDelete(p_can_obj_dummy->tx_queue);
-    }
-    vQueueDelete(p_can_obj_dummy->rx_queue);
-    vSemaphoreDelete(p_can_obj_dummy->alert_semphr);
+    ESP_ERROR_CHECK(esp_intr_free(p_can_obj_dummy->isr_handle));  //Free interrupt
 #ifdef CONFIG_PM_ENABLE
     //Release and delete power management lock
     ESP_ERROR_CHECK(esp_pm_lock_release(p_can_obj_dummy->pm_lock));
-    ESP_ERROR_CHECK(esp_pm_lock_delete(p_can_obj_dummy->pm_lock));
 #endif
-    free(p_can_obj_dummy);        //Free can driver object
-
+    can_free_driver_obj(p_can_obj_dummy);
     return ESP_OK;
 }
 
@@ -767,7 +865,8 @@ esp_err_t can_start()
     //Reset RX queue, and RX message count
     xQueueReset(p_can_obj->rx_queue);
     p_can_obj->rx_msg_count = 0;
-    configASSERT(can_enter_reset_mode() == ESP_OK); //Should already be in bus-off mode, set again to make sure
+    esp_err_t err = can_enter_reset_mode(); //Should already be in bus-off mode, set again to make sure
+    assert(err == ESP_OK);
 
     //Currently in listen only mode, need to set to mode specified by configuration
     can_mode_t mode;
@@ -780,7 +879,8 @@ esp_err_t can_start()
     }
     can_config_mode(mode);                              //Set mode
     (void) can_get_interrupt_reason();                  //Clear interrupt register
-    configASSERT(can_exit_reset_mode() == ESP_OK);
+    err = can_exit_reset_mode();
+    assert(err == ESP_OK);
 
     CAN_RESET_FLAG(p_can_obj->control_flags, CTRL_FLAG_STOPPED);
     CAN_EXIT_CRITICAL();
@@ -795,7 +895,8 @@ esp_err_t can_stop()
     CAN_CHECK_FROM_CRIT(!(p_can_obj->control_flags & (CTRL_FLAG_STOPPED | CTRL_FLAG_BUS_OFF)), ESP_ERR_INVALID_STATE);
 
     //Clear interrupts and reset flags
-    configASSERT(can_enter_reset_mode() == ESP_OK);
+    esp_err_t err = can_enter_reset_mode();
+    assert(err == ESP_OK);
     (void) can_get_interrupt_reason();          //Read interrupt register to clear interrupts
     can_config_mode(CAN_MODE_LISTEN_ONLY);      //Set to listen only mode to freeze REC
     CAN_RESET_FLAG(p_can_obj->control_flags, CTRL_FLAG_TX_BUFF_OCCUPIED);
@@ -846,11 +947,13 @@ esp_err_t can_transmit(const can_message_t *message, TickType_t ticks_to_wait)
             CAN_ENTER_CRITICAL();
             if (p_can_obj->control_flags & (CTRL_FLAG_STOPPED | CTRL_FLAG_BUS_OFF)) {
                 //TX queue was reset (due to stop/bus_off), remove copied frame from queue to prevent transmission
-                configASSERT(xQueueReceive(p_can_obj->tx_queue, &tx_frame, 0) == pdTRUE);
+                int res = xQueueReceive(p_can_obj->tx_queue, &tx_frame, 0);
+                assert(res == pdTRUE);
                 ret = ESP_ERR_INVALID_STATE;
             } else if ((p_can_obj->tx_msg_count == 0) && !(p_can_obj->control_flags & CTRL_FLAG_TX_BUFF_OCCUPIED)) {
                 //TX buffer was freed during copy, manually trigger transmission
-                configASSERT(xQueueReceive(p_can_obj->tx_queue, &tx_frame, 0) == pdTRUE);
+                int res = xQueueReceive(p_can_obj->tx_queue, &tx_frame, 0);
+                assert(res == pdTRUE);
                 can_set_tx_buffer_and_transmit(&tx_frame);
                 p_can_obj->tx_msg_count++;
                 CAN_SET_FLAG(p_can_obj->control_flags, CTRL_FLAG_TX_BUFF_OCCUPIED);
@@ -912,15 +1015,16 @@ esp_err_t can_read_alerts(uint32_t *alerts, TickType_t ticks_to_wait)
 esp_err_t can_reconfigure_alerts(uint32_t alerts_enabled, uint32_t *current_alerts)
 {
     CAN_CHECK(p_can_obj != NULL, ESP_ERR_INVALID_STATE);
+
     CAN_ENTER_CRITICAL();
-    uint32_t cur_alerts;
-    can_read_alerts(&cur_alerts, 0);                    //Clear any unhandled alerts
+    //Clear any unhandled alerts
+    if (current_alerts != NULL) {
+        *current_alerts = p_can_obj->alerts_triggered;;
+    }
+    p_can_obj->alerts_triggered = 0;
     p_can_obj->alerts_enabled = alerts_enabled;         //Update enabled alerts
     CAN_EXIT_CRITICAL();
 
-    if (current_alerts != NULL) {
-        *current_alerts = cur_alerts;
-    }
     return ESP_OK;
 }
 
@@ -941,7 +1045,8 @@ esp_err_t can_initiate_recovery()
     CAN_SET_FLAG(p_can_obj->control_flags, CTRL_FLAG_RECOVERING);
 
     //Trigger start of recovery process
-    configASSERT(can_exit_reset_mode() == ESP_OK);
+    esp_err_t err = can_exit_reset_mode();
+    assert(err == ESP_OK);
     CAN_EXIT_CRITICAL();
 
     return ESP_OK;

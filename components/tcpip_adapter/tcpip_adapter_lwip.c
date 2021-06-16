@@ -33,6 +33,10 @@
 #include "netif/wlanif.h"
 #include "netif/ethernetif.h"
 
+#if CONFIG_LWIP_TCP_ISN_HOOK
+#include "tcp_isn.h"
+#endif
+
 #include "dhcpserver/dhcpserver.h"
 #include "dhcpserver/dhcpserver_options.h"
 
@@ -102,6 +106,18 @@ void tcpip_adapter_init(void)
     int ret;
 
     if (tcpip_inited == false) {
+#if CONFIG_LWIP_TCP_ISN_HOOK
+        uint8_t rand_buf[16];
+        /*
+         * This is early startup code where WiFi/BT is yet to be enabled and hence
+         * relevant entropy source is not available. However, bootloader enables
+         * SAR ADC based entropy source at its initialization, and our requirement
+         * of random bytes is pretty small (16), so we can assume that following
+         * API will provide sufficiently random data.
+         */
+        esp_fill_random(rand_buf, sizeof(rand_buf));
+        lwip_init_tcp_isn(esp_log_timestamp(), rand_buf);
+#endif
         tcpip_inited = true;
 
         tcpip_init(NULL, NULL);
@@ -325,6 +341,10 @@ esp_err_t tcpip_adapter_down(tcpip_adapter_if_t tcpip_if)
             tcpip_adapter_reset_ip_info(tcpip_if);
         }
 
+        for(int8_t i = 0 ;i < LWIP_IPV6_NUM_ADDRESSES ;i++) {
+            netif_ip6_addr_set(esp_netif[tcpip_if] ,i ,IP6_ADDR_ANY6);
+            netif_ip6_addr_set_state(esp_netif[tcpip_if], i, IP6_ADDR_INVALID);
+        }
         netif_set_addr(esp_netif[tcpip_if], IP4_ADDR_ANY4, IP4_ADDR_ANY4, IP4_ADDR_ANY4);
         netif_set_down(esp_netif[tcpip_if]);
         tcpip_adapter_start_ip_lost_timer(tcpip_if);
@@ -534,6 +554,29 @@ esp_err_t tcpip_adapter_get_ip6_linklocal(tcpip_adapter_if_t tcpip_if, ip6_addr_
         return ESP_FAIL;
     }
     return ESP_OK;
+}
+
+esp_err_t tcpip_adapter_get_ip6_global(tcpip_adapter_if_t tcpip_if, ip6_addr_t *if_ip6)
+{
+    ESP_LOGD(TAG, "%s esp-netif:%p", __func__, esp_netif);
+
+    if (tcpip_if >=TCPIP_ADAPTER_IF_MAX || if_ip6 == NULL) {
+        return ESP_ERR_TCPIP_ADAPTER_INVALID_PARAMS;
+    }
+
+    int i;
+    struct netif *p_netif = esp_netif[tcpip_if];
+
+    if (p_netif != NULL && netif_is_up(p_netif)) {
+        for (i = 1; i < LWIP_IPV6_NUM_ADDRESSES; i++) {
+            if (ip6_addr_ispreferred(netif_ip6_addr_state(p_netif, i))) {
+                memcpy(if_ip6, &p_netif->ip6_addr[i], sizeof(ip6_addr_t));
+                return ESP_OK;
+            }
+        }
+    }
+
+    return ESP_FAIL;
 }
 
 #if 0
@@ -752,6 +795,7 @@ esp_err_t tcpip_adapter_get_dns_info(tcpip_adapter_if_t tcpip_if, tcpip_adapter_
 
     dns_param.dns_type =  type;
     dns_param.dns_info =  dns;
+    const ip_addr_t*  dns_ip = NULL;
     
     TCPIP_ADAPTER_IPC_CALL(tcpip_if, type,  0, &dns_param, tcpip_adapter_get_dns_info_api);
     if (!dns) {
@@ -770,7 +814,10 @@ esp_err_t tcpip_adapter_get_dns_info(tcpip_adapter_if_t tcpip_if, tcpip_adapter_
     }
 
     if (tcpip_if == TCPIP_ADAPTER_IF_STA || tcpip_if == TCPIP_ADAPTER_IF_ETH) {
-        dns->ip = dns_getserver(type);
+        dns_ip = dns_getserver(type);
+        if (dns_ip != NULL) {
+            dns->ip = *dns_ip;
+        }
     } else {
         dns->ip.u_addr.ip4 = dhcps_dns_getserver();
     }
@@ -808,6 +855,7 @@ esp_err_t tcpip_adapter_dhcps_start(tcpip_adapter_if_t tcpip_if)
         if (p_netif != NULL && netif_is_up(p_netif)) {
             tcpip_adapter_ip_info_t default_ip;
             tcpip_adapter_get_ip_info(ESP_IF_WIFI_AP, &default_ip);
+            dhcps_set_new_lease_cb(tcpip_adapter_dhcps_cb);
             dhcps_start(p_netif, default_ip.ip);
             dhcps_status = TCPIP_ADAPTER_DHCP_STARTED;
             ESP_LOGD(TAG, "dhcp server start successfully");
