@@ -422,19 +422,15 @@ int clock_gettime (clockid_t clock_id, struct timespec *tp)
             tp->tv_sec = tv.tv_sec;
             tp->tv_nsec = tv.tv_usec * 1000L;
             break;
-        }
         case CLOCK_MONOTONIC:
-        {
-            uint64_t monotonic_time_us = 0;
 #if defined( WITH_FRC )
-            monotonic_time_us = (uint64_t)esp_timer_get_time();
+            monotonic_time_us = (uint64_t) esp_timer_get_time();
 #elif defined( WITH_RTC )
             monotonic_time_us = get_rtc_time_us();
 #endif // WITH_FRC
             tp->tv_sec = monotonic_time_us / 1000000LL;
             tp->tv_nsec = (monotonic_time_us % 1000000LL) * 1000L;
             break;
-        }
         default:
             errno = EINVAL;
             return -1;

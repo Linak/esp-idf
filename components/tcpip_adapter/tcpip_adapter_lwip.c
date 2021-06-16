@@ -814,10 +814,7 @@ esp_err_t tcpip_adapter_get_dns_info(tcpip_adapter_if_t tcpip_if, tcpip_adapter_
     }
 
     if (tcpip_if == TCPIP_ADAPTER_IF_STA || tcpip_if == TCPIP_ADAPTER_IF_ETH) {
-        dns_ip = dns_getserver(type);
-        if (dns_ip != NULL) {
-            dns->ip = *dns_ip;
-        }
+        dns->ip = dns_getserver(type);
     } else {
         dns->ip.u_addr.ip4 = dhcps_dns_getserver();
     }
