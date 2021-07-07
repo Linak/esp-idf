@@ -59,7 +59,7 @@
 #endif
 
 #define BTC_TASK_PINNED_TO_CORE         (TASK_PINNED_TO_CORE)
-#define BTC_TASK_PRIO                   (configMAX_PRIORITIES - 6)
+#define BTC_TASK_PRIO                   (configMAX_PRIORITIES - 4)
 #define BTC_TASK_QUEUE_LEN              60
 
 /* Define trace levels */
