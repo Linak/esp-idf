@@ -117,6 +117,8 @@ int esp_tls_conn_destroy(esp_tls_t *tls)
 
 esp_tls_t *esp_tls_init(void)
 {
+    ESP_LOGI(TAG, "esp_tls_init, sizeof(esp_tls_t)=%d", sizeof(esp_tls_t));
+
     esp_tls_t *tls = (esp_tls_t *)calloc(1, sizeof(esp_tls_t));
     if (!tls) {
         return NULL;
