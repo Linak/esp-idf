@@ -230,6 +230,12 @@ static esp_err_t load_partitions(void)
             item->info.encrypted = true;
         }
 
+        // Always remove encrypted on nvs (data)
+        if ((item->info.type == PART_TYPE_DATA) && (item->info.subtype == PART_SUBTYPE_DATA_NVS))
+        {
+            item->info.encrypted = false;
+        }
+
         // item->info.label is initialized by calloc, so resulting string will be null terminated
         strncpy(item->info.label, (const char*) entry.label, sizeof(item->info.label) - 1);
 
