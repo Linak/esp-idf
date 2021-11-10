@@ -231,7 +231,7 @@ static esp_err_t load_partitions(void)
         }
 
         // Always remove encrypted on nvs (data)
-        if ((item->info.type == PART_TYPE_DATA) && (item->info.subtype == PART_SUBTYPE_DATA_NVS))
+        if ((item->info.type == PART_TYPE_DATA) && (item->info.subtype == PART_SUBTYPE_DATA_WIFI))
         {
             item->info.encrypted = false;
         }
