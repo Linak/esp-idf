@@ -230,11 +230,14 @@ static esp_err_t load_partitions(void)
             item->info.encrypted = true;
         }
 
-        // Always remove encrypted on nvs (data)
-        if ((item->info.type == PART_TYPE_DATA) && (item->info.subtype == PART_SUBTYPE_DATA_WIFI))
-        {
+#if CONFIG_NVS_COMPATIBLE_PRE_V4_3_ENCRYPTION_FLAG
+        if (entry.type == ESP_PARTITION_TYPE_DATA &&
+                    entry.subtype == ESP_PARTITION_SUBTYPE_DATA_NVS &&
+                    (entry.flags & PART_FLAG_ENCRYPTED)) {
+            ESP_LOGI(TAG, "Ignoring encrypted flag for \"%s\" partition", entry.label);
             item->info.encrypted = false;
         }
+#endif
 
         // item->info.label is initialized by calloc, so resulting string will be null terminated
         strncpy(item->info.label, (const char*) entry.label, sizeof(item->info.label) - 1);
