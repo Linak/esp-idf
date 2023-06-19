@@ -38,7 +38,7 @@ set(ESPTOOLPY_FLASH_OPTIONS
     )
 
 if(NOT BOOTLOADER_BUILD)
-    set(esptool_elf2image_args --elf-sha256-offset 0xb0)
+    #set(esptool_elf2image_args --elf-sha256-offset 0xb0)
 endif()
 
 if(NOT CONFIG_SECURE_BOOT_ALLOW_SHORT_APP_PARTITION AND
