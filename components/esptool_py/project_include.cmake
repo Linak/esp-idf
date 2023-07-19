@@ -49,7 +49,7 @@ if(NOT CONFIG_APP_BUILD_TYPE_RAM AND CONFIG_APP_BUILD_GENERATE_BINARIES)
     set(MMU_PAGE_SIZE ${CONFIG_MMU_PAGE_MODE})
 
     if(NOT BOOTLOADER_BUILD)
-        list(APPEND esptool_elf2image_args --elf-sha256-offset 0xb0)
+	#list(APPEND esptool_elf2image_args --elf-sha256-offset 0xb0)
         # For chips that support configurable MMU page size feature
         # If page size is configured to values other than the default "64KB" in menuconfig,
         # then we need to pass the actual size to flash-mmu-page-size arg
